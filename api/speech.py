@@ -24,6 +24,7 @@ to stop the conversation.
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import signal
 import sys
@@ -180,19 +181,32 @@ class TextToSpeechEngine:
         self.config = config
         self.client = AsyncOpenAI(api_key=config.openai_api_key)
         self.player = LocalAudioPlayer()
+        self._response_format = (self.config.openai_tts_response_format or "mp3").strip()
 
-    async def _stream_response(self, text: str) -> None:
+    def _build_request_args(self, text: str) -> dict:
         instructions = (self.config.openai_tts_instructions or "").strip()
         request_args = {
             "model": self.config.openai_tts_model,
             "voice": self.config.openai_tts_voice,
             "input": text,
-            "response_format": self.config.openai_tts_response_format,
+            "response_format": self._response_format,
         }
         if instructions:
             request_args["instructions"] = instructions
+        return request_args
+
+    async def _stream_response(self, text: str) -> None:
+        request_args = self._build_request_args(text)
         async with self.client.audio.speech.with_streaming_response.create(**request_args) as response:
             await self.player.play(response)
+
+    async def _collect_audio_bytes(self, text: str) -> bytes:
+        request_args = self._build_request_args(text)
+        async with self.client.audio.speech.with_streaming_response.create(**request_args) as response:
+            audio_bytes = bytearray()
+            async for chunk in response.iter_bytes():
+                audio_bytes.extend(chunk)
+        return bytes(audio_bytes)
 
     @staticmethod
     def _run_async(coro: Coroutine[Any, Any, None]) -> None:
@@ -203,10 +217,45 @@ class TextToSpeechEngine:
             return
         loop.create_task(coro)
 
+    @staticmethod
+    def _run_async_with_result(coro: Coroutine[Any, Any, bytes]) -> bytes:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        if loop.is_running():  # pragma: no cover
+            raise RuntimeError("Cannot generate TTS audio while event loop is running.")
+        return loop.run_until_complete(coro)
+
     def speak(self, text: str) -> None:
         if not text.strip():
             return
         self._run_async(self._stream_response(text.strip()))
+
+    def synthesize_to_base64(self, text: str) -> Optional[Tuple[str, str]]:
+        if not text.strip():
+            return None
+        audio_bytes = self._run_async_with_result(self._collect_audio_bytes(text.strip()))
+        if not audio_bytes:
+            return None
+        encoded = base64.b64encode(audio_bytes).decode("ascii")
+        return encoded, self._mime_type()
+
+    def _mime_type(self) -> str:
+        fmt = self._response_format.lower().lstrip(".")
+        mapping = {
+            "mp3": "audio/mpeg",
+            "mpeg": "audio/mpeg",
+            "wav": "audio/wav",
+            "wave": "audio/wav",
+            "pcm": "audio/wav",
+            "ogg": "audio/ogg",
+            "aac": "audio/aac",
+            "flac": "audio/flac",
+        }
+        if fmt.startswith("audio/"):
+            return fmt
+        return mapping.get(fmt, f"audio/{fmt}")
 
 
 class LangChainCerebrasChat(BaseChatModel):

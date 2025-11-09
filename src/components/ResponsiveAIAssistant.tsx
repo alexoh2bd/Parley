@@ -11,6 +11,7 @@ interface Message {
   text: string;
   sender: 'user' | 'ai';
   timestamp: Date;
+  audioUrl?: string;
 }
 
 export function ResponsiveAIAssistant() {
@@ -21,7 +22,6 @@ export function ResponsiveAIAssistant() {
   const [showChat, setShowChat] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const [recognition, setRecognition] = useState<SpeechRecognition | null>(null);
-  const [speechSynthesis, setSpeechSynthesis] = useState<SpeechSynthesis | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const [sessionId, setSessionId] = useState<string>('');
@@ -31,15 +31,95 @@ export function ResponsiveAIAssistant() {
   const [isAIResponding, setIsAIResponding] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const speechQueueRef = useRef<string[]>([]);
-  const isSpeakingRef = useRef(false);
+  const audioQueueRef = useRef<string[]>([]);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const [conversationMode, setConversationMode] = useState(true);
   const [audioMode, setAudioMode] = useState(false); // Enable/disable TTS
+  const audioModeRef = useRef(audioMode);
   const [interimTranscript, setInterimTranscript] = useState('');
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const isRecognitionRunningRef = useRef(false);
   const lastTranscriptRef = useRef<string>('');
+  const micEnabledRef = useRef(false);
+  const stopCurrentAudio = () => {
+    if (currentAudioRef.current) {
+      try {
+        currentAudioRef.current.pause();
+      } catch (err) {
+        console.error('[Audio] Failed to pause playback:', err);
+      }
+      currentAudioRef.current = null;
+    }
+    setIsSpeaking(false);
+  };
+
+  const playNextAudio = () => {
+    if (!audioModeRef.current) {
+      return;
+    }
+    if (currentAudioRef.current) {
+      return;
+    }
+    const nextUrl = audioQueueRef.current.shift();
+    if (!nextUrl) {
+      setIsSpeaking(false);
+      return;
+    }
+    const audio = new Audio(nextUrl);
+    currentAudioRef.current = audio;
+    const handleComplete = () => {
+      if (currentAudioRef.current === audio) {
+        currentAudioRef.current = null;
+      }
+      if (audioQueueRef.current.length === 0) {
+        setIsSpeaking(false);
+      }
+      playNextAudio();
+    };
+    audio.onended = handleComplete;
+    audio.onerror = (err) => {
+      console.error('[Audio] Playback error:', err);
+      handleComplete();
+    };
+    audio.play()
+      .then(() => setIsSpeaking(true))
+      .catch((err) => {
+        console.error('[Audio] Failed to start playback:', err);
+        handleComplete();
+      });
+  };
+
+  const enqueueAudio = (url: string) => {
+    if (!url) return;
+    audioQueueRef.current.push(url);
+    if (audioModeRef.current) {
+      playNextAudio();
+    }
+  };
+
+  const buildAudioUrl = (audioBase64?: string, mimeType?: string) => {
+    if (!audioBase64) return undefined;
+    return `data:${mimeType || 'audio/mpeg'};base64,${audioBase64}`;
+  };
+
+  useEffect(() => {
+    audioModeRef.current = audioMode;
+    if (!audioMode) {
+      audioQueueRef.current = [];
+      stopCurrentAudio();
+    } else {
+      playNextAudio();
+    }
+  }, [audioMode]);
+
+  useEffect(() => {
+    return () => {
+      audioQueueRef.current = [];
+      stopCurrentAudio();
+    };
+  }, []);
+
   useEffect(() => {
     // Initialize speech recognition
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -131,7 +211,7 @@ export function ResponsiveAIAssistant() {
         isRecognitionRunningRef.current = false;
         
         // Recognition ended - restart if in conversation mode
-        if (conversationMode && !isAIResponding) {
+        if (conversationMode && micEnabledRef.current && !isAIResponding) {
           setTimeout(() => {
             if (!isRecognitionRunningRef.current) {
               try {
@@ -148,11 +228,6 @@ export function ResponsiveAIAssistant() {
       };
 
       setRecognition(recognitionInstance);
-    }
-
-    // Initialize speech synthesis
-    if ('speechSynthesis' in window) {
-      setSpeechSynthesis(window.speechSynthesis);
     }
 
     // Initialize WebSocket connection
@@ -207,28 +282,28 @@ export function ResponsiveAIAssistant() {
     newSocket.on('ai_chunk', (data) => {
       console.log('[WebSocket] Received chunk:', data.content);
       setCurrentAIMessage(prev => prev + data.content);
-      
-      // Only speak if audio mode is enabled
-      if (audioMode) {
-        speakChunk(data.content);
-      }
     });
 
     newSocket.on('ai_complete', (data) => {
       console.log('[WebSocket] AI response complete');
       setIsAIResponding(false);
       
+      const audioUrl = buildAudioUrl(data.audioBase64, data.audioMimeType);
       const aiMessage: Message = {
         id: Date.now().toString(),
         text: data.fullResponse,
         sender: 'ai',
-        timestamp: new Date()
+        timestamp: new Date(),
+        audioUrl
       };
       setMessages(prev => [...prev, aiMessage]);
       setCurrentAIMessage('');
+      if (audioUrl && audioMode) {
+        enqueueAudio(audioUrl);
+      }
       
       // Resume listening after AI finishes
-      if (conversationMode && recognition) {
+      if (conversationMode && recognition && micEnabledRef.current) {
         // In audio mode, wait longer for TTS to complete
         const delay = audioMode ? 1500 : 500;
         console.log(`[Audio] Resuming listening in ${delay}ms`);
@@ -238,6 +313,7 @@ export function ResponsiveAIAssistant() {
             try {
               recognition.start();
               isRecognitionRunningRef.current = true;
+              setIsListening(true);
             } catch (e) {
               console.error('[Speech] Failed to restart:', e);
               console.error('[Audio] Failed to restart recognition:', e);
@@ -278,44 +354,6 @@ export function ResponsiveAIAssistant() {
     }
   }, [messages, currentAIMessage]);
 
-  // Progressive TTS - speak chunks as they arrive
-  const speakChunk = (text: string) => {
-    if (!speechSynthesis || !text.trim()) return;
-    
-    // Add to queue
-    speechQueueRef.current.push(text);
-    
-    // Process queue if not already speaking
-    if (!isSpeakingRef.current) {
-      processNextSpeech();
-    }
-  };
-
-  const processNextSpeech = () => {
-    if (speechQueueRef.current.length === 0) {
-      isSpeakingRef.current = false;
-      setIsSpeaking(false);
-      return;
-    }
-
-    isSpeakingRef.current = true;
-    setIsSpeaking(true);
-
-    const text = speechQueueRef.current.shift()!;
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 0.9;
-    utterance.pitch = 1;
-    
-    utterance.onend = () => {
-      processNextSpeech();
-    };
-    
-    utterance.onerror = () => {
-      processNextSpeech();
-    };
-
-    speechSynthesis!.speak(utterance);
-  };
   const toggleConversationMode = () => {
     if (!recognition) {
       alert('Speech recognition not supported');
@@ -329,6 +367,7 @@ export function ResponsiveAIAssistant() {
       setConversationMode(false);
       setAudioMode(false); // Also disable audio
       setIsListening(false);
+      micEnabledRef.current = false;
     } else {
       // Start conversation mode
       if (!isRecognitionRunningRef.current) {
@@ -338,6 +377,7 @@ export function ResponsiveAIAssistant() {
           setConversationMode(true);
           setAudioMode(true); // Auto-enable audio for full voice conversation
           setIsListening(true);
+          micEnabledRef.current = true;
         } catch (e) {
           console.error('[Speech] Failed to start conversation mode:', e);
         }
@@ -407,12 +447,14 @@ export function ResponsiveAIAssistant() {
       recognition.stop();
       isRecognitionRunningRef.current = false;
       setIsListening(false);
+      micEnabledRef.current = false;
     } else {
       if (!isRecognitionRunningRef.current) {
         try {
           recognition.start();
           isRecognitionRunningRef.current = true;
           setIsListening(true);
+          micEnabledRef.current = true;
         } catch (e) {
           console.error('[Speech] Failed to start:', e);
         }
@@ -420,32 +462,14 @@ export function ResponsiveAIAssistant() {
     }
   };
   
-  
 
-  const handleSpeak = (text: string) => {
-    if (!speechSynthesis) {
-      alert('Speech synthesis is not supported in your browser.');
+  const handleSpeak = (message: Message) => {
+    if (!message.audioUrl) {
+      alert('Audio is not available for this response yet.');
       return;
     }
-
-    if (isSpeaking) {
-      // Stop current speech
-      speechSynthesis.cancel();
-      speechQueueRef.current = [];
-      isSpeakingRef.current = false;
-      setIsSpeaking(false);
-      return;
-    }
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 0.9;
-    utterance.pitch = 1;
-    
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    speechSynthesis.speak(utterance);
+    const audio = new Audio(message.audioUrl);
+    audio.play().catch((err) => console.error('[Audio] Manual playback failed:', err));
   };
   
 
@@ -683,7 +707,7 @@ export function ResponsiveAIAssistant() {
                             variant="ghost"
                             size="sm"
                             className="shrink-0 h-8 w-8 p-0 text-gray-300 hover:bg-white/10"
-                            onClick={() => handleSpeak(message.text)}
+                            onClick={() => handleSpeak(message)}
                           >
                             <Volume2 className="h-4 w-4" />
                           </Button>
