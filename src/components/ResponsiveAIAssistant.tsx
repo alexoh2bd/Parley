@@ -1,3 +1,5 @@
+// src/components/ResponsiveAIAssistant.tsx (FINAL COMPLETE REPLACEMENT)
+
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -6,6 +8,18 @@ import { Mic, MicOff, Send, Settings, Menu, X, MessageSquare, Zap, Volume2, User
 import globeImage from '../assets/parley.png';
 import { io, Socket } from 'socket.io-client';
 
+// === PROP DEFINITIONS ===
+interface SessionDataType { 
+  sessionId: string; 
+  filename: string; 
+  initialMessage: string;
+}
+
+interface ResponsiveAIAssistantProps {
+  sessionData: SessionDataType | null;
+  setSessionData: React.Dispatch<React.SetStateAction<SessionDataType | null>>;
+}
+
 interface Message {
   id: string;
   text: string;
@@ -13,7 +27,105 @@ interface Message {
   timestamp: Date;
 }
 
-export function ResponsiveAIAssistant() {
+// Ensure this matches the API base URL in usePdfUploader.js for the reset call
+const API_BASE_URL = 'http://localhost:8501'; 
+
+
+// === ACTIVE PDF STATUS ELEMENT (Sidebar) ===
+const ActivePdfDisplay: React.FC<ResponsiveAIAssistantProps & {setShowModal: React.Dispatch<React.SetStateAction<boolean>>; setContent: React.Dispatch<React.SetStateAction<string>>}> = ({ sessionData, setSessionData, setShowModal, setContent }) => {
+    if (!sessionData) {
+        return null; 
+    }
+
+    const handleResetClick = () => {
+        if (!window.confirm("Are you sure you want to remove the study material and reset the conversation?")) {
+            return;
+        }
+        
+        // 1. Clear session on the server
+        fetch(`${API_BASE_URL}/api/reset`, { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: sessionData.sessionId })
+        }).catch(err => console.error("Error resetting server session:", err));
+        
+        // 2. Clear state on the frontend
+        setSessionData(null);
+    };
+
+    const handleViewClick = async () => {
+        setContent('Loading PDF content...');
+        setShowModal(true);
+        
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/pdf-content?sessionId=${sessionData.sessionId}`);
+            
+            // FIX: Check for successful JSON parsing response headers
+            if (!response.ok) {
+                 const errorText = await response.text();
+                 // If the response is HTML (starts with <!), the server crashed.
+                 if (errorText.startsWith("<!")) {
+                    setContent(`Server Error: The backend crashed while fetching the PDF content. Please check the Flask console.`);
+                 } else {
+                    // Try to parse JSON error message if the server followed the protocol
+                    const errorJson = JSON.parse(errorText);
+                    setContent(`Error: ${errorJson.error || 'Unknown server error.'}`);
+                 }
+                 return;
+            }
+
+            const result = await response.json();
+
+            if (result.success) {
+                setContent(result.pdfText);
+            } else {
+                setContent(`Error: Could not retrieve PDF text. ${result.error || 'Server failed.'}`);
+            }
+        } catch (error) {
+            setContent(`Network Error: ${error.message}. Ensure the Flask server is running and accessible at ${API_BASE_URL}.`);
+        }
+    };
+
+    return (
+        <div className="p-4 border-t border-b border-gray-700/50 space-y-2">
+            <h4 className="text-gray-300 text-sm font-semibold">📚 Active Study Material</h4>
+            <div className="flex flex-col gap-2">
+                <div 
+                    className="bg-gray-800/80 text-white p-2 rounded-md truncate" 
+                    title={sessionData.filename}
+                >
+                    <span className="text-cyan-400 mr-2">📄</span>
+                    {sessionData.filename.length > 25 
+                        ? sessionData.filename.substring(0, 22) + '...' 
+                        : sessionData.filename}
+                </div>
+                
+                <Button 
+                    onClick={handleViewClick}
+                    variant="default"
+                    size="sm"
+                    className="w-full text-xs bg-cyan-600 hover:bg-cyan-500"
+                >
+                    View Full PDF Content
+                </Button>
+                
+                <Button 
+                    onClick={handleResetClick}
+                    variant="destructive"
+                    size="sm"
+                    className="w-full text-xs"
+                >
+                    <X className="w-3 h-3 mr-1" /> Remove & Reset Session
+                </Button>
+            </div>
+        </div>
+    );
+};
+// ==========================================================
+
+
+// === Main Component: ResponsiveAIAssistant ===
+export function ResponsiveAIAssistant({ sessionData, setSessionData }: ResponsiveAIAssistantProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isListening, setIsListening] = useState(false);
@@ -35,18 +147,47 @@ export function ResponsiveAIAssistant() {
   const isSpeakingRef = useRef(false);
 
   const [conversationMode, setConversationMode] = useState(true);
-  const [audioMode, setAudioMode] = useState(false); // Enable/disable TTS
+  const [isConversationLocked, setIsConversationLocked] = useState(false); 
+  const [audioMode, setAudioMode] = useState(true);
   const [interimTranscript, setInterimTranscript] = useState('');
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const isRecognitionRunningRef = useRef(false);
   const lastTranscriptRef = useRef<string>('');
+
+  const [showPdfModal, setShowPdfModal] = useState(false); 
+  const [pdfContent, setPdfContent] = useState('Loading PDF content...');
+  
+  // *** PROP/STATE INTEGRATION: Load session data and auto-show chat ***
+  useEffect(() => {
+    if (sessionData && !showChat) {
+        setShowChat(true);
+        
+        const hasInitialMessage = messages.some(msg => msg.text === sessionData.initialMessage);
+        
+        if (sessionData.initialMessage && !hasInitialMessage) {
+             const initialMsg: Message = {
+                id: Date.now().toString(),
+                text: sessionData.initialMessage,
+                sender: 'ai',
+                timestamp: new Date()
+            };
+            setMessages(prev => [...prev, initialMsg]);
+        }
+    } else if (!sessionData && messages.length > 0) {
+        setMessages([]);
+        setShowChat(false);
+        setIsConversationLocked(true); 
+    }
+  }, [sessionData, showChat, messages.length]);
+  // *******************************************************************
+  
   useEffect(() => {
     // Initialize speech recognition
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       const recognitionInstance = new SpeechRecognition();
-      recognitionInstance.continuous = true;  // ✅ Keep listening
-      recognitionInstance.interimResults = true;  // ✅ Show live transcription
+      recognitionInstance.continuous = true;
+      recognitionInstance.interimResults = true;
       recognitionInstance.lang = 'en-US';
 
       recognitionInstance.onresult = (event) => {
@@ -63,85 +204,56 @@ export function ResponsiveAIAssistant() {
           }
         }
         
-        // Store the latest transcript (interim or final)
         const currentText = finalText || interimText;
         if (currentText) {
           lastTranscriptRef.current = currentText;
           setInterimTranscript(currentText);
-          console.log('[Speech] 🎤 Current:', currentText);
-        }
-        
-        // If we get a final result, send it immediately
-        if (finalText && conversationMode) {
-          console.log('[Speech] ✅ Final result - sending:', finalText);
-          handleSendMessage(finalText);
-          setInterimTranscript('');
-          lastTranscriptRef.current = '';
         }
       };
-      let silenceTimer: NodeJS.Timeout | null = null;
-
+      
       recognitionInstance.onspeechend = () => {
-        console.log('[Speech] 🛑 Speech ended');
-        
-        // Send accumulated text after short delay (in case final result comes)
-        silenceTimer = setTimeout(() => {
-          const textToSend = lastTranscriptRef.current.trim();
-          
-          if (textToSend && conversationMode) {
-            console.log('[Speech] ✅ Sending on speechend:', textToSend);
-            handleSendMessage(textToSend);
-            setInterimTranscript('');
-            lastTranscriptRef.current = '';
-          }
-        }, 500); // Wait 100ms for potential final result
+        recognitionInstance.stop(); 
       };
 
       recognitionInstance.onspeechstart = () => {
-        console.log('[Speech] 🎙️ Speech started');
-        
-        // Clear silence timer and reset for new utterance
-        if (silenceTimer) {
-          clearTimeout(silenceTimer);
-        }
         lastTranscriptRef.current = '';
       };
+      
       recognitionInstance.onerror = (event) => {
-        console.error('[Speech] Error:', event.error);
-        
-        if (event.error === 'no-speech') {
-          // No speech detected - restart
-          if (conversationMode) {
+        if (event.error === 'no-speech' || event.error === 'aborted') {
+          if (conversationMode && !isConversationLocked) {
             setTimeout(() => recognition?.start(), 1000);
           }
-        } else if (event.error === 'aborted') {
-          // Aborted - restart if in conversation mode
-          if (conversationMode) {
-            setTimeout(() => recognition?.start(), 500);
-          }
         } else {
-          // Other errors - stop conversation mode
           setConversationMode(false);
           setIsListening(false);
+          setIsConversationLocked(true);
         }
       };
 
       recognitionInstance.onend = () => {
-        console.log('[Speech] Recognition ended');
         isRecognitionRunningRef.current = false;
         
-        // Recognition ended - restart if in conversation mode
-        if (conversationMode && !isAIResponding) {
+        const textToSend = lastTranscriptRef.current.trim();
+        if (textToSend && conversationMode) {
+            handleSendMessage(textToSend);
+            setInterimTranscript('');
+            lastTranscriptRef.current = '';
+        }
+        
+        if (conversationMode && !isAIResponding && !isConversationLocked) {
+          const delay = audioMode ? 1500 : 500;
+          
           setTimeout(() => {
             if (!isRecognitionRunningRef.current) {
               try {
-                recognition?.start();
+                recognition.start();
                 isRecognitionRunningRef.current = true;
               } catch (e) {
                 console.error('[Speech] Failed to restart:', e);
               }
             }
-          }, 100);
+          }, delay);
         } else {
           setIsListening(false);
         }
@@ -162,34 +274,29 @@ export function ResponsiveAIAssistant() {
       reconnectionDelay: 1000,
       reconnectionAttempts: 5
     });
-
+    
     newSocket.on('connect', () => {
-      console.log('[WebSocket] ✅ Connected to server');
       setIsConnected(true);
     });
 
     newSocket.on('connected', (data) => {
-      console.log('[WebSocket] ✅ Received session ID:', data.sessionId);
       setSessionId(data.sessionId);
-      sessionIdRef.current = data.sessionId; // Set ref immediately
+      sessionIdRef.current = data.sessionId;
       
-      // Join the session
-      console.log('[WebSocket] 📤 Joining session:', data.sessionId);
       newSocket.emit('join_session', { sessionId: data.sessionId });
     });
 
     newSocket.on('session_joined', (data) => {
-      console.log('[WebSocket] ✅ Joined session:', data.sessionId);
-      console.log('[WebSocket] 🎯 Ready to send/receive messages');
-      
-      // Mark as fully connected and ready
       setIsConnected(true);
-      // sessionId already set in 'connected' event, but update again for safety
       sessionIdRef.current = data.sessionId;
       
-      // Load conversation history if any
-      if (data.history && data.history.length > 0) {
-        console.log('[WebSocket] 📜 Loading history:', data.history.length, 'messages');
+      if (!sessionData && data.history && data.history.length > 0) {
+        
+        const lastAIMessage = data.history.slice().reverse().find((msg: any) => msg.role === 'tutor');
+        if (lastAIMessage && audioMode) {
+             speakChunk(lastAIMessage.content); 
+        }
+
         const loadedMessages: Message[] = data.history.map((msg: any, idx: number) => ({
           id: `history-${idx}`,
           text: msg.content,
@@ -197,28 +304,23 @@ export function ResponsiveAIAssistant() {
           timestamp: new Date()
         }));
         setMessages(loadedMessages);
+        setShowChat(true);
       }
     });
 
     newSocket.on('ai_start', () => {
-      console.log('[WebSocket] AI started responding');
       setIsAIResponding(true);
       setCurrentAIMessage('');
-      
     });
 
     newSocket.on('ai_chunk', (data) => {
-      console.log('[WebSocket] Received chunk:', data.content);
       setCurrentAIMessage(prev => prev + data.content);
-      
-      // Only speak if audio mode is enabled
-      if (audioMode) {
+      if (audioMode) { 
         speakChunk(data.content);
       }
     });
 
     newSocket.on('ai_complete', (data) => {
-      console.log('[WebSocket] AI response complete');
       setIsAIResponding(false);
       
       const aiMessage: Message = {
@@ -230,11 +332,8 @@ export function ResponsiveAIAssistant() {
       setMessages(prev => [...prev, aiMessage]);
       setCurrentAIMessage('');
       
-      // Resume listening after AI finishes
-      if (conversationMode && recognition) {
-        // In audio mode, wait longer for TTS to complete
+      if (conversationMode && recognition && !isConversationLocked) {
         const delay = audioMode ? 1500 : 500;
-        console.log(`[Audio] Resuming listening in ${delay}ms`);
         
         setTimeout(() => {
           if (!isRecognitionRunningRef.current) {
@@ -243,7 +342,6 @@ export function ResponsiveAIAssistant() {
               isRecognitionRunningRef.current = true;
             } catch (e) {
               console.error('[Speech] Failed to restart:', e);
-              console.error('[Audio] Failed to restart recognition:', e);
             }
           }
         }, delay);
@@ -251,13 +349,11 @@ export function ResponsiveAIAssistant() {
     });
 
     newSocket.on('error', (data) => {
-      console.error('[WebSocket] Error:', data.message);
       alert(`Error: ${data.message}`);
       setIsAIResponding(false);
     });
 
     newSocket.on('disconnect', () => {
-      console.log('[WebSocket] Disconnected from server');
       setIsConnected(false);
     });
 
@@ -270,7 +366,6 @@ export function ResponsiveAIAssistant() {
   }, []);
 
   useEffect(() => {
-    // Only auto-scroll if user is near the bottom (within 100px)
     const container = messagesContainerRef.current;
     if (container) {
       const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
@@ -281,14 +376,11 @@ export function ResponsiveAIAssistant() {
     }
   }, [messages, currentAIMessage]);
 
-  // Progressive TTS - speak chunks as they arrive
   const speakChunk = (text: string) => {
     if (!speechSynthesis || !text.trim()) return;
     
-    // Add to queue
     speechQueueRef.current.push(text);
     
-    // Process queue if not already speaking
     if (!isSpeakingRef.current) {
       processNextSpeech();
     }
@@ -319,6 +411,7 @@ export function ResponsiveAIAssistant() {
 
     speechSynthesis!.speak(utterance);
   };
+  
   const toggleConversationMode = () => {
     if (!recognition) {
       alert('Speech recognition not supported');
@@ -326,20 +419,20 @@ export function ResponsiveAIAssistant() {
     }
     
     if (conversationMode) {
-      // Stop conversation mode
-      recognition.stop();
+      recognition.stop(); 
       isRecognitionRunningRef.current = false;
       setConversationMode(false);
-      setAudioMode(false); // Also disable audio
+      setAudioMode(false);
       setIsListening(false);
-    } else {
-      // Start conversation mode
+      setIsConversationLocked(true);
+
+    } else if (!isConversationLocked) {
       if (!isRecognitionRunningRef.current) {
         try {
           recognition.start();
           isRecognitionRunningRef.current = true;
           setConversationMode(true);
-          setAudioMode(true); // Auto-enable audio for full voice conversation
+          setAudioMode(true);
           setIsListening(true);
         } catch (e) {
           console.error('[Speech] Failed to start conversation mode:', e);
@@ -351,34 +444,15 @@ export function ResponsiveAIAssistant() {
   const handleSendMessage = (messageText?: string) => {
     const textToSend = messageText || inputText;
     
-    // Use refs for immediate access
     const activeSocket = socketRef.current || socket;
-    const activeSessionId = sessionIdRef.current || sessionId;
-    
-    console.log('[Message] 🔍 Debug state:', {
-      text: textToSend,
-      socketRef: !!socketRef.current,
-      socketState: !!socket,
-      sessionIdRef: sessionIdRef.current,
-      sessionIdState: sessionId,
-      activeSessionId: activeSessionId,
-      isConnected: isConnected
-    });
+    const activeSessionId = sessionData?.sessionId || sessionIdRef.current || sessionId;
     
     if (!textToSend.trim() || !activeSocket || !activeSessionId) {
-      console.error('[Message] ❌ Cannot send:', {
-        hasText: !!textToSend.trim(),
-        hasSocket: !!activeSocket,
-        hasSessionId: !!activeSessionId
-      });
-      
       if (!activeSocket || !activeSessionId) {
         alert('Not connected to server. Please wait...');
       }
       return;
     }
-
-    console.log('[Message] Sending:', textToSend);
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -390,11 +464,6 @@ export function ResponsiveAIAssistant() {
     setMessages(prev => [...prev, userMessage]);
     setShowChat(true);
 
-    // Send message via WebSocket
-    console.log('[WebSocket] 📤 Emitting user_message:', {
-      sessionId: activeSessionId,
-      message: textToSend
-    });
     activeSocket.emit('user_message', {
       sessionId: activeSessionId,
       message: textToSend
@@ -410,7 +479,7 @@ export function ResponsiveAIAssistant() {
     }
 
     if (isListening) {
-      recognition.stop();
+      recognition.stop(); 
       isRecognitionRunningRef.current = false;
       setIsListening(false);
     } else {
@@ -426,8 +495,6 @@ export function ResponsiveAIAssistant() {
     }
   };
   
-  
-
   const handleSpeak = (text: string) => {
     if (!speechSynthesis) {
       alert('Speech synthesis is not supported in your browser.');
@@ -435,7 +502,6 @@ export function ResponsiveAIAssistant() {
     }
 
     if (isSpeaking) {
-      // Stop current speech
       speechSynthesis.cancel();
       speechQueueRef.current = [];
       isSpeakingRef.current = false;
@@ -454,7 +520,6 @@ export function ResponsiveAIAssistant() {
     speechSynthesis.speak(utterance);
   };
   
-
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -462,8 +527,38 @@ export function ResponsiveAIAssistant() {
     }
   };
 
+
   return (
       <div className="h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-neutral-900 relative overflow-hidden">
+        
+        {/* === PDF Modal (New Element) === */}
+        {showPdfModal && (
+            <div 
+                className="fixed inset-0 bg-black/90 z-[60] flex items-center justify-center p-4" 
+                onClick={() => setShowPdfModal(false)}
+            >
+                <Card 
+                    className="w-[90%] lg:w-[70%] h-[90%] bg-gray-950 border border-gray-700 p-6 flex flex-col shadow-2xl"
+                    onClick={(e) => e.stopPropagation()} 
+                >
+                    <div className="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                        <h3 className="text-xl text-white">Full Content: {sessionData?.filename}</h3>
+                        <Button 
+                            variant="ghost" 
+                            onClick={() => setShowPdfModal(false)}
+                            className="text-white hover:bg-red-700/50"
+                        >
+                            <X className="w-6 h-6" />
+                        </Button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto bg-gray-900 p-4 rounded-md text-gray-300 whitespace-pre-wrap font-mono text-sm">
+                        {pdfContent}
+                    </div>
+                </Card>
+            </div>
+        )}
+        {/* =============================== */}
+
         {/* Conversation Mode Indicator */}
         {conversationMode && (
           <div className="fixed top-4 right-4 z-50">
@@ -504,6 +599,15 @@ export function ResponsiveAIAssistant() {
                 </Button>
               </div>
               
+              {/* === MOBILE PDF DISPLAY === */}
+              <ActivePdfDisplay 
+                sessionData={sessionData} 
+                setSessionData={setSessionData} 
+                setShowModal={setShowPdfModal}
+                setContent={setPdfContent}
+              />
+              {/* ========================== */}
+
               <div className="space-y-4">
                 <Button variant="ghost" className="w-full justify-start text-white hover:bg-gray-800">
                   <MessageSquare className="w-4 h-4 mr-3" />
@@ -535,6 +639,15 @@ export function ResponsiveAIAssistant() {
             <p className="text-gray-300 text-sm">Your intelligent companion</p>
           </div>
           
+          {/* === DESKTOP PDF DISPLAY === */}
+          <ActivePdfDisplay 
+            sessionData={sessionData} 
+            setSessionData={setSessionData} 
+            setShowModal={setShowPdfModal}
+            setContent={setPdfContent}
+          />
+          {/* ============================= */}
+
           <div className="space-y-3">
             <Button variant="ghost" className="w-full justify-start text-white hover:bg-gray-800/50">
               <MessageSquare className="w-4 h-4 mr-3" />
@@ -586,79 +699,7 @@ export function ResponsiveAIAssistant() {
 
         {/* Content Area */}
         <div className="flex-1 relative z-10 px-4 lg:px-6">
-          {!showChat ? (
-            /* Welcome Screen */
-            <div className="flex flex-col items-center justify-center h-full text-center space-y-6 lg:space-y-8">
-              {/* Globe */}
-              <div className="relative">
-                <div className="w-32 h-32 lg:w-48 lg:h-48 relative">
-                  <img 
-                    src={globeImage} 
-                    alt="AI Globe"
-                    className="w-full h-full object-contain drop-shadow-2xl"
-                  />
-                  {(isListening || isSpeaking) && (
-                    <div className="absolute inset-0 rounded-full border-4 border-cyan-400 animate-ping"></div>
-                  )}
-                  <div className="absolute inset-0 bg-gradient-to-r from-cyan-400/20 to-blue-400/20 rounded-full blur-xl"></div>
-                </div>
-              </div>
-
-              {/* Welcome Text */}
-              <div className="space-y-2 lg:space-y-4">
-                <h2 className="text-2xl lg:text-4xl text-white">Hello there!</h2>
-                <p className="text-lg lg:text-xl text-gray-200">I'm your AI assistant</p>
-                <p className="text-base lg:text-lg text-gray-300 max-w-md">
-                  Ready to help you with questions, tasks, and conversations
-                </p>
-              </div>
-
-              {/* Quick Action Buttons */}
-              <div className="flex flex-wrap gap-3 lg:gap-4 justify-center max-w-lg">
-                <Button
-                  onClick={() => setShowChat(true)}
-                  className="bg-gray-700 hover:bg-gray-600 text-white border-0 px-6 py-3 rounded-full shadow-lg"
-                >
-                  <MessageSquare className="w-4 h-4 mr-2" />
-                  Start Chat
-                </Button>
-                <Button
-                  onClick={toggleConversationMode}
-                  className={`${
-                    conversationMode 
-                      ? 'bg-red-600 hover:bg-red-500' 
-                      : 'bg-green-600 hover:bg-green-500'
-                  } text-white border-0 px-6 py-3 rounded-full shadow-lg`}
-                >
-                  {conversationMode ? (
-                    <>
-                      <MicOff className="w-4 h-4 mr-2" />
-                      Stop Conversation
-                    </>
-                  ) : (
-                    <>
-                      <Mic className="w-4 h-4 mr-2" />
-                      Start Conversation
-                    </>
-                  )}
-                </Button>
-                
-                <Button
-                  onClick={() => setAudioMode(!audioMode)}
-                  disabled={!conversationMode}
-                  className={`${
-                    audioMode 
-                      ? 'bg-blue-600 hover:bg-blue-500' 
-                      : 'bg-gray-700 hover:bg-gray-600'
-                  } text-white border-0 px-6 py-3 rounded-full shadow-lg disabled:opacity-50`}
-                  title={conversationMode ? (audioMode ? 'Disable voice output' : 'Enable voice output') : 'Start conversation first'}
-                >
-                  <Volume2 className="w-4 h-4 mr-2" />
-                  {audioMode ? 'Audio On' : 'Audio Off'}
-                </Button>
-              </div>
-            </div>
-          ) : (
+          {sessionData || showChat ? ( 
             /* Chat Interface */
             <div className="h-full flex flex-col">
               {/* Chat Messages */}
@@ -717,6 +758,79 @@ export function ResponsiveAIAssistant() {
                 )}
                 
                 <div ref={messagesEndRef} />
+              </div>
+            </div>
+          ) : (
+            /* Welcome Screen */
+            <div className="flex flex-col items-center justify-center h-full text-center space-y-6 lg:space-y-8">
+              {/* Globe */}
+              <div className="relative">
+                <div className="w-32 h-32 lg:w-48 lg:h-48 relative">
+                  <img 
+                    src={globeImage} 
+                    alt="AI Globe"
+                    className="w-full h-full object-contain drop-shadow-2xl"
+                  />
+                  {(isListening || isSpeaking) && (
+                    <div className="absolute inset-0 rounded-full border-4 border-cyan-400 animate-ping"></div>
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-r from-cyan-400/20 to-blue-400/20 rounded-full blur-xl"></div>
+                </div>
+              </div>
+
+              {/* Welcome Text */}
+              <div className="space-y-2 lg:space-y-4">
+                <h2 className="text-2xl lg:text-4xl text-white">Hello there!</h2>
+                <p className="text-lg lg:text-xl text-gray-200">I'm your AI assistant</p>
+                <p className="text-base lg:text-lg text-gray-300 max-w-md">
+                  Ready to help you with questions, tasks, and conversations
+                </p>
+              </div>
+
+              {/* Quick Action Buttons */}
+              <div className="flex flex-wrap gap-3 lg:gap-4 justify-center max-w-lg">
+                <Button
+                  onClick={() => setShowChat(true)}
+                  className="bg-gray-700 hover:bg-gray-600 text-white border-0 px-6 py-3 rounded-full shadow-lg"
+                >
+                  <MessageSquare className="w-4 h-4 mr-2" />
+                  Start Chat
+                </Button>
+                <Button
+                  onClick={toggleConversationMode}
+                  disabled={isConversationLocked} // Lock after manual stop
+                  className={`${
+                    conversationMode 
+                      ? 'bg-red-600 hover:bg-red-500' 
+                      : 'bg-green-600 hover:bg-green-500'
+                  } text-white border-0 px-6 py-3 rounded-full shadow-lg disabled:opacity-50`}
+                >
+                  {conversationMode ? (
+                    <>
+                      <MicOff className="w-4 h-4 mr-2" />
+                      Stop Conversation
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="w-4 h-4 mr-2" />
+                      Start Conversation
+                    </>
+                  )}
+                </Button>
+                
+                <Button
+                  onClick={() => setAudioMode(!audioMode)}
+                  disabled={!conversationMode}
+                  className={`${
+                    audioMode 
+                      ? 'bg-blue-600 hover:bg-blue-500' 
+                      : 'bg-gray-700 hover:bg-gray-600'
+                  } text-white border-0 px-6 py-3 rounded-full shadow-lg disabled:opacity-50`}
+                  title={conversationMode ? (audioMode ? 'Disable voice output' : 'Enable voice output') : 'Start conversation first'}
+                >
+                  <Volume2 className="w-4 h-4 mr-2" />
+                  {audioMode ? 'Audio On' : 'Audio Off'}
+                </Button>
               </div>
             </div>
           )}

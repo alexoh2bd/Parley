@@ -3,6 +3,7 @@
 Endpoints:
     POST /api/upload-pdf     - Upload and process PDF file
     POST /api/start-conversation - Initialize conversation with PDF context
+    GET  /api/pdf-content     - Retrieve full text content of the uploaded PDF
     POST /api/listen         - Capture voice input from microphone
     POST /api/send-message   - Send message to Cerebras and get response
     GET  /api/conversation-history - Get current conversation history
@@ -181,7 +182,6 @@ def upload_pdf():
     
     try:
         # Read PDF text (frontend already processed it, so we just receive the text)
-        # In a full implementation, you'd process the PDF here
         pdf_text = request.form.get('pdfText', '')
         
         if not pdf_text:
@@ -247,6 +247,38 @@ def start_conversation():
     except Exception as e:
         print(f"Error starting conversation: {e}", file=sys.stderr)
         return jsonify({'error': str(e)}), 500
+
+
+# --- ENDPOINT TO RETRIEVE PDF CONTENT TEXT ---
+@app.route('/api/pdf-content', methods=['GET'])
+def get_pdf_content():
+    """Get the full PDF content text for the active session."""
+    try:
+        # Try to get sessionId from query parameters (used by fetch GET request)
+        session_id = request.args.get('sessionId') or session.get('session_id')
+        
+        if not session_id:
+            # Explicitly return JSON for 400 error
+            return jsonify({'success': False, 'error': 'No active session ID provided.'}), 400
+            
+        pdf_text = pdf_storage.get(session_id)
+        
+        if pdf_text is None:
+            # Explicitly return JSON for 404 error
+            return jsonify({'success': False, 'error': 'PDF content not found for this session. It may have expired.'}), 404
+            
+        # Success path
+        return jsonify({
+            'success': True,
+            'pdfText': pdf_text
+        })
+        
+    except Exception as e:
+        # CRITICAL FIX: Catch any unexpected Python errors and return a JSON 500
+        print(f"Error retrieving PDF content: {e}", file=sys.stderr)
+        # We must return JSON here to prevent the frontend from crashing on <!doctype html>
+        return jsonify({'success': False, 'error': f'Internal server error while fetching PDF content: {str(e)}'}), 500
+# ---------------------------------------------------
 
 
 @app.route('/api/listen', methods=['POST'])
