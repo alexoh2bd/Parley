@@ -161,6 +161,19 @@ Guidelines:
                 print(f"[Voice] Error during speech synthesis: {exc}", file=sys.stderr)
         
         threading.Thread(target=_speak, daemon=True).start()
+
+    def build_audio_payload(self, text: str) -> Optional[Dict[str, str]]:
+        if not self.tts or not text.strip():
+            return None
+        try:
+            result = self.tts.synthesize_to_base64(text)
+        except Exception as exc:
+            print(f"[Voice] Failed to synthesize audio: {exc}", file=sys.stderr)
+            return None
+        if not result:
+            return None
+        audio_b64, mime_type = result
+        return {"audioBase64": audio_b64, "audioMimeType": mime_type}
     
     def get_history(self) -> List[Dict]:
         """Get conversation history as JSON-serializable list."""
@@ -272,12 +285,16 @@ def start_conversation():
             "Hello! I've uploaded my study material and I'm ready to learn."
         )
         conv.speak_async(initial_message)
+        audio_payload = conv.build_audio_payload(initial_message) or {}
         
-        return jsonify({
+        response_body = {
             'success': True,
             'message': initial_message,
             'sessionId': session_id
-        })
+        }
+        response_body.update(audio_payload)
+        
+        return jsonify(response_body)
     
     except Exception as e:
         print(f"Error starting conversation: {e}", file=sys.stderr)
@@ -331,12 +348,16 @@ def send_message():
         conv = conversations[session_id]
         response = conv.send_message(user_input)
         conv.speak_async(response)
+        audio_payload = conv.build_audio_payload(response) or {}
         
-        return jsonify({
+        response_body = {
             'success': True,
             'response': response,
             'history': conv.get_history()
-        })
+        }
+        response_body.update(audio_payload)
+        
+        return jsonify(response_body)
     
     except Exception as e:
         print(f"Error sending message: {e}", file=sys.stderr)
@@ -481,11 +502,13 @@ def handle_message(data):
         conv.history.append(human_msg)
         conv.history.append(AIMessage(content=response_text))
         conv.speak_async(response_text)
-        
+        audio_payload = conv.build_audio_payload(response_text) or {}
+
         # Notify client that response is complete
         emit('ai_complete', {
             'fullResponse': response_text,
-            'history': conv.get_history()
+            'history': conv.get_history(),
+            **audio_payload
         })
         
         print(f'[WebSocket] Completed response for {session_id}: {len(response_text)} chars')
