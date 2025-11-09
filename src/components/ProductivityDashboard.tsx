@@ -4,7 +4,7 @@ import { Button } from './ui/button';
 import { Progress } from './ui/progress';
 import { Badge } from './ui/badge';
 import { TrendingUp, Calendar, Clock, Target, BarChart3, Activity, Users, Zap } from 'lucide-react';
-import exampleImage from 'figma:asset/b638caa0ba09a47b99268eb04825697fe72fd1c4.png';
+import exampleImage from '../asset/parley.png';
 
 export function ProductivityDashboard() {
   return (

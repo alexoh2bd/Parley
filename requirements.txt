@@ -1,0 +1,26 @@
+# Flask & server
+flask
+flask-cors
+flask-socketio
+fastapi
+uvicorn
+python-dotenv
+
+# LangChain & AI
+langchain
+langchain-core
+langchain-community
+langchain-cerebras
+
+# PDF Processing
+pypdf2
+
+# Text processing & embeddings
+tiktoken
+
+# Async support
+aiofiles
+pydantic
+cerebras-cloud-sdk
+speechrecognition
+pyttsx3
