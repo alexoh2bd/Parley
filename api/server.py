@@ -28,6 +28,7 @@ from speech import (
     TextToSpeechEngine,
     LangChainCerebrasChat,
 )
+from prompt import get_iterative_prompt, get_system_prompt
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 
 load_dotenv('.env.local')
@@ -93,16 +94,7 @@ class ConversationSession:
     
     def _build_system_prompt(self) -> str:
         """Build system prompt including PDF context."""
-        base_prompt = """You are an enthusiastic, encouraging AI tutor helping a student learn from their study material.
-
-Guidelines:
-- Keep responses conversational and natural (2-4 sentences)
-- Explain concepts clearly and check understanding
-- Be warm and encouraging
-- Keep it SHORT - responses will be spoken aloud
-- Reference the material when relevant
-"""
-        
+        base_prompt = get_system_prompt()
         if self.pdf_text:
             return f"{base_prompt}\n\n=== STUDY MATERIAL ===\n{self.pdf_text}\n\n=== END MATERIAL ===\n\nUse this material to guide your tutoring."
         
@@ -134,8 +126,10 @@ Guidelines:
     def send_message(self, user_input: str) -> str:
         """Send message to Cerebras and get response."""
         human_msg = HumanMessage(content=user_input)
-        messages = [*self.history, human_msg]
-        
+        iter_guide = get_iterative_prompt()
+        guidance = SystemMessage(content=iter_guide)
+        messages = [*self.history, guidance, human_msg]
+
         try:
             ai_message = self.llm.invoke(messages)
             response_text = self._extract_text(ai_message)
@@ -339,6 +333,8 @@ def send_message():
     if not session_id or session_id not in conversations:
         return jsonify({'error': 'No active conversation'}), 400
     
+
+
     user_input = data.get('message', '').strip()
     
     if not user_input:
