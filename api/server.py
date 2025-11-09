@@ -17,6 +17,7 @@ from werkzeug.utils import secure_filename
 import os
 import sys
 import tempfile
+import threading
 from typing import Optional, Dict, List
 from dotenv import load_dotenv
 
@@ -30,6 +31,8 @@ from speech import (
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 
 load_dotenv('.env.local')
+
+VOICE_IO_ENABLED = os.getenv('ENABLE_SERVER_VOICE', 'false').lower() == 'true'
 
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -74,8 +77,11 @@ class ConversationSession:
         self.config.validate()
         
         # Initialize components
-        # self.stt = SpeechRecognizer(self.config)
-        # self.tts = TextToSpeechEngine()
+        self.voice_enabled = VOICE_IO_ENABLED
+        self.stt: Optional[SpeechRecognizer] = None
+        self.tts: Optional[TextToSpeechEngine] = None
+        if self.voice_enabled:
+            self._initialize_voice_components()
         self.llm = LangChainCerebrasChat(self.config)
         
         # Conversation history
@@ -102,9 +108,28 @@ Guidelines:
         
         return base_prompt
     
-    # def listen(self) -> Optional[str]:
-    #     """Capture voice input from microphone."""
-    #     return self.stt.listen()
+    def _initialize_voice_components(self) -> None:
+        """Set up optional speech components."""
+        try:
+            self.stt = SpeechRecognizer(self.config)
+        except Exception as exc:
+            self.stt = None
+            print(f"[Voice] Failed to initialize speech recognition: {exc}", file=sys.stderr)
+        
+        try:
+            self.tts = TextToSpeechEngine(self.config)
+        except Exception as exc:
+            self.tts = None
+            print(f"[Voice] Failed to initialize text-to-speech: {exc}", file=sys.stderr)
+        
+        if not self.stt and not self.tts:
+            self.voice_enabled = False
+
+    def listen(self) -> Optional[str]:
+        """Capture voice input from microphone."""
+        if not self.stt:
+            raise RuntimeError("Speech recognition is not enabled on this server.")
+        return self.stt.listen()
     
     def send_message(self, user_input: str) -> str:
         """Send message to Cerebras and get response."""
@@ -124,9 +149,18 @@ Guidelines:
             print(f"[Cerebras error] {exc}", file=sys.stderr)
             raise
 
-    # def speak(self, text: str) -> None:
-    #     """Speak text using TTS."""
-    #     self.tts.speak(text)
+    def speak_async(self, text: str) -> None:
+        """Speak text using TTS in a background thread."""
+        if not self.tts or not text.strip():
+            return
+        
+        def _speak():
+            try:
+                self.tts.speak(text)
+            except Exception as exc:
+                print(f"[Voice] Error during speech synthesis: {exc}", file=sys.stderr)
+        
+        threading.Thread(target=_speak, daemon=True).start()
     
     def get_history(self) -> List[Dict]:
         """Get conversation history as JSON-serializable list."""
@@ -237,6 +271,7 @@ def start_conversation():
         initial_message = conv.send_message(
             "Hello! I've uploaded my study material and I'm ready to learn."
         )
+        conv.speak_async(initial_message)
         
         return jsonify({
             'success': True,
@@ -260,6 +295,9 @@ def listen():
     
     try:
         conv = conversations[session_id]
+        if not getattr(conv, "stt", None):
+            return jsonify({'error': 'Speech recognition not enabled on server'}), 400
+        
         utterance = conv.listen()
         
         if not utterance:
@@ -292,6 +330,7 @@ def send_message():
     try:
         conv = conversations[session_id]
         response = conv.send_message(user_input)
+        conv.speak_async(response)
         
         return jsonify({
             'success': True,
@@ -441,6 +480,7 @@ def handle_message(data):
         response_text = ''.join(full_response)
         conv.history.append(human_msg)
         conv.history.append(AIMessage(content=response_text))
+        conv.speak_async(response_text)
         
         # Notify client that response is complete
         emit('ai_complete', {

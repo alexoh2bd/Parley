@@ -2,7 +2,7 @@
 Voice-driven interface for chatting with Cerebras-hosted LLMs.
 
 Requires the following third-party packages:
-    pip install speechrecognition pyaudio pyttsx3 cerebras-cloud-sdk langchain-core langchain
+    pip install speechrecognition pyaudio openai cerebras-cloud-sdk langchain-core langchain
 
 Environment variables:
     CEREBRAS_API_KEY        -> Required. Key from cerebras.ai
@@ -23,12 +23,13 @@ to stop the conversation.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, Coroutine
 
 from dotenv import load_dotenv
 from pydantic import ConfigDict
@@ -55,12 +56,14 @@ else:
     _SR_IMPORT_ERROR = None
 
 try:
-    import pyttsx3
+    from openai import AsyncOpenAI
+    from openai.helpers import LocalAudioPlayer
 except ImportError as exc:  # pragma: no cover
-    pyttsx3 = None  # type: ignore
-    _TTS_ENGINE_IMPORT_ERROR = exc
+    AsyncOpenAI = None  # type: ignore
+    LocalAudioPlayer = None  # type: ignore
+    _OPENAI_IMPORT_ERROR = exc
 else:
-    _TTS_ENGINE_IMPORT_ERROR = None
+    _OPENAI_IMPORT_ERROR = None
 
 try:
     from cerebras.cloud.sdk import Cerebras
@@ -107,6 +110,15 @@ class Config:
     cerebras_top_p: float = field(
         default_factory=lambda: float(os.getenv("CEREBRAS_TOP_P", str(DEFAULT_TOP_P)))
     )
+    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
+    openai_tts_model: str = field(default_factory=lambda: os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"))
+    openai_tts_voice: str = field(default_factory=lambda: os.getenv("OPENAI_TTS_VOICE", "nova"))
+    openai_tts_instructions: str = field(
+        default_factory=lambda: os.getenv(
+            "OPENAI_TTS_INSTRUCTIONS", "Speak like a professor who is helpful, yet focused"
+        )
+    )
+    openai_tts_response_format: str = field(default_factory=lambda: os.getenv("OPENAI_TTS_RESPONSE_FORMAT", "pcm"))
     exit_phrases: Tuple[str, ...] = field(default_factory=lambda: _comma_env("EXIT_PHRASES", DEFAULT_EXIT_PHRASES))
     energy_threshold: int = field(default_factory=lambda: int(os.getenv("ENERGY_THRESHOLD", "300")))
     pause_threshold: float = field(default_factory=lambda: float(os.getenv("PAUSE_THRESHOLD", "0.8")))
@@ -128,8 +140,6 @@ class Config:
             )
         if sr is None:  # pragma: no cover
             raise SystemExit(f"speechrecognition is not installed (pip install speechrecognition). Details: {_SR_IMPORT_ERROR}")
-        if pyttsx3 is None:  # pragma: no cover
-            raise SystemExit(f"pyttsx3 is not installed (pip install pyttsx3). Details: {_TTS_ENGINE_IMPORT_ERROR}")
 
 
 class SpeechRecognizer:
@@ -158,16 +168,45 @@ class SpeechRecognizer:
 
 
 class TextToSpeechEngine:
-    """pyttsx3 wrapper so we can speak responses."""
+    """OpenAI streaming text-to-speech helper."""
 
-    def __init__(self) -> None:
-        self.engine = pyttsx3.init()
+    def __init__(self, config: Config) -> None:
+        if AsyncOpenAI is None or LocalAudioPlayer is None:  # pragma: no cover
+            raise RuntimeError(
+                f"openai SDK is not installed (pip install openai). Details: {_OPENAI_IMPORT_ERROR}"
+            )
+        if not config.openai_api_key:
+            raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
+        self.config = config
+        self.client = AsyncOpenAI(api_key=config.openai_api_key)
+        self.player = LocalAudioPlayer()
+
+    async def _stream_response(self, text: str) -> None:
+        instructions = (self.config.openai_tts_instructions or "").strip()
+        request_args = {
+            "model": self.config.openai_tts_model,
+            "voice": self.config.openai_tts_voice,
+            "input": text,
+            "response_format": self.config.openai_tts_response_format,
+        }
+        if instructions:
+            request_args["instructions"] = instructions
+        async with self.client.audio.speech.with_streaming_response.create(**request_args) as response:
+            await self.player.play(response)
+
+    @staticmethod
+    def _run_async(coro: Coroutine[Any, Any, None]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+            return
+        loop.create_task(coro)
 
     def speak(self, text: str) -> None:
-        if not text:
+        if not text.strip():
             return
-        self.engine.say(text)
-        self.engine.runAndWait()
+        self._run_async(self._stream_response(text.strip()))
 
 
 class LangChainCerebrasChat(BaseChatModel):
@@ -290,7 +329,7 @@ class ConversationLoop:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.stt = SpeechRecognizer(config)
-        self.tts = TextToSpeechEngine()
+        self.tts = TextToSpeechEngine(config)
         self.llm = LangChainCerebrasChat(config)
         self.history: List[BaseMessage] = []
         if config.system_instruction:
