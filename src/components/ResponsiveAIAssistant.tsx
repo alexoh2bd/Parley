@@ -171,6 +171,8 @@ export function ResponsiveAIAssistant() {
     newSocket.on('connected', (data) => {
       console.log('[WebSocket] ✅ Received session ID:', data.sessionId);
       setSessionId(data.sessionId);
+      sessionIdRef.current = data.sessionId; // Set ref immediately
+      
       // Join the session
       console.log('[WebSocket] 📤 Joining session:', data.sessionId);
       newSocket.emit('join_session', { sessionId: data.sessionId });
@@ -182,6 +184,7 @@ export function ResponsiveAIAssistant() {
       
       // Mark as fully connected and ready
       setIsConnected(true);
+      // sessionId already set in 'connected' event, but update again for safety
       sessionIdRef.current = data.sessionId;
       
       // Load conversation history if any
@@ -352,10 +355,13 @@ export function ResponsiveAIAssistant() {
     const activeSocket = socketRef.current || socket;
     const activeSessionId = sessionIdRef.current || sessionId;
     
-    console.log('[Message] Attempting to send:', {
+    console.log('[Message] 🔍 Debug state:', {
       text: textToSend,
-      hasSocket: !!activeSocket,
-      hasSessionId: !!activeSessionId,
+      socketRef: !!socketRef.current,
+      socketState: !!socket,
+      sessionIdRef: sessionIdRef.current,
+      sessionIdState: sessionId,
+      activeSessionId: activeSessionId,
       isConnected: isConnected
     });
     
