@@ -23,4 +23,4 @@ aiofiles
 pydantic
 cerebras-cloud-sdk
 speechrecognition
-pyttsx3
+openai
