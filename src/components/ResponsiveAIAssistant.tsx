@@ -66,6 +66,18 @@ export function ResponsiveAIAssistant() {
       setIsSpeaking(false);
       return;
     }
+    
+    // Stop speech recognition before playing audio to prevent feedback
+    if (recognition && isRecognitionRunningRef.current) {
+      console.log('[Audio] Stopping recognition before playback');
+      try {
+        recognition.stop();
+        isRecognitionRunningRef.current = false;
+      } catch (e) {
+        console.error('[Audio] Failed to stop recognition:', e);
+      }
+    }
+    
     const audio = new Audio(nextUrl);
     currentAudioRef.current = audio;
     const handleComplete = () => {
@@ -74,6 +86,22 @@ export function ResponsiveAIAssistant() {
       }
       if (audioQueueRef.current.length === 0) {
         setIsSpeaking(false);
+        
+        // Resume speech recognition after audio finishes
+        if (conversationMode && micEnabledRef.current && recognition) {
+          console.log('[Audio] Resuming recognition after playback');
+          setTimeout(() => {
+            if (!isRecognitionRunningRef.current) {
+              try {
+                recognition.start();
+                isRecognitionRunningRef.current = true;
+                setIsListening(true);
+              } catch (e) {
+                console.error('[Audio] Failed to restart recognition:', e);
+              }
+            }
+          }, 500); // Small delay to ensure audio has fully stopped
+        }
       }
       playNextAudio();
     };
@@ -280,6 +308,17 @@ export function ResponsiveAIAssistant() {
       setIsAIResponding(true);
       setCurrentAIMessage('');
       
+      // Stop speech recognition when AI starts responding
+      if (recognition && isRecognitionRunningRef.current) {
+        console.log('[AI] Stopping recognition during AI response');
+        try {
+          recognition.stop();
+          isRecognitionRunningRef.current = false;
+          setIsListening(false);
+        } catch (e) {
+          console.error('[AI] Failed to stop recognition:', e);
+        }
+      }
     });
 
     newSocket.on('ai_chunk', (data) => {
@@ -305,11 +344,11 @@ export function ResponsiveAIAssistant() {
         enqueueAudio(audioUrl);
       }
       
-      // Resume listening after AI finishes
-      if (conversationMode && recognition && micEnabledRef.current) {
-        // In audio mode, wait longer for TTS to complete
-        const delay = audioMode ? 1500 : 500;
-        console.log(`[Audio] Resuming listening in ${delay}ms`);
+      // Resume listening after AI finishes (only if audio mode is off)
+      // If audio mode is on, recognition will resume after audio playback completes
+      if (conversationMode && recognition && micEnabledRef.current && !audioMode) {
+        const delay = 500;
+        console.log(`[AI] Resuming listening in ${delay}ms (no audio mode)`);
         
         setTimeout(() => {
           if (!isRecognitionRunningRef.current) {
@@ -318,12 +357,12 @@ export function ResponsiveAIAssistant() {
               isRecognitionRunningRef.current = true;
               setIsListening(true);
             } catch (e) {
-              console.error('[Speech] Failed to restart:', e);
-              console.error('[Audio] Failed to restart recognition:', e);
+              console.error('[AI] Failed to restart recognition:', e);
             }
           }
         }, delay);
       }
+      // If audio mode is on, recognition will be resumed by playNextAudio after audio completes
     });
 
     newSocket.on('error', (data) => {

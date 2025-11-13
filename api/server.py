@@ -30,7 +30,7 @@ from speech import (
 )
 from prompt import get_iterative_prompt, get_system_prompt
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
-
+from prompts import get_system_prompt, get_iterative_prompt
 load_dotenv('.env.local')
 
 VOICE_IO_ENABLED = os.getenv('ENABLE_SERVER_VOICE', 'false').lower() == 'true'
@@ -67,7 +67,6 @@ socketio = SocketIO(
 conversations: Dict[str, Dict] = {}
 pdf_storage: Dict[str, str] = {}  # Store PDF text by session_id
 
-
 class ConversationSession:
     """Manages a single conversation session with Cerebras."""
     
@@ -76,6 +75,8 @@ class ConversationSession:
         self.pdf_text = pdf_text
         self.config = Config()
         self.config.validate()
+        # self.isfirst = True
+
         
         # Initialize components
         self.voice_enabled = VOICE_IO_ENABLED
@@ -91,10 +92,17 @@ class ConversationSession:
         # Build system prompt with PDF context
         system_prompt = self._build_system_prompt()
         self.history.append(SystemMessage(content=system_prompt))
-    
+
+
     def _build_system_prompt(self) -> str:
         """Build system prompt including PDF context."""
+        # if self.isfirst:
         base_prompt = get_system_prompt()
+            # self.isfirst = False
+        # else:
+        #     base_prompt = get_iterative_prompt()
+
+
         if self.pdf_text:
             return f"{base_prompt}\n\n=== STUDY MATERIAL ===\n{self.pdf_text}\n\n=== END MATERIAL ===\n\nUse this material to guide your tutoring."
         
@@ -126,15 +134,23 @@ class ConversationSession:
     def send_message(self, user_input: str) -> str:
         """Send message to Cerebras and get response."""
         human_msg = HumanMessage(content=user_input)
+        
+        # Add iterative prompt before user message to guide this turn
+        iterative_guidance = get_iterative_prompt()
+        guidance_msg = SystemMessage(content=iterative_guidance)
+        
+        # Build messages: history + iterative guidance + user message
         iter_guide = get_iterative_prompt()
         guidance = SystemMessage(content=iter_guide)
-        messages = [*self.history, guidance, human_msg]
+        messages = [*self.history, guidance_msg, guidance, human_msg]
 
         try:
             ai_message = self.llm.invoke(messages)
             response_text = self._extract_text(ai_message)
             
             if response_text:
+                # Only save user message and AI response to history
+                # Don't save the iterative guidance (it's added fresh each turn)
                 self.history.append(human_msg)
                 self.history.append(ai_message)
             
@@ -490,7 +506,7 @@ def handle_message(data):
                     if filtered:
                         emit('ai_chunk', {'content': filtered})
                         full_response.append(filtered)
-            except (AttributeError, IndexError):
+            except (AttributeError, IndexError):    
                 continue
         
         # Update conversation history
